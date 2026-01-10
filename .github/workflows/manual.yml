@@ -33,8 +33,6 @@ jobs:
       - name : Get Baseline
         run: |
               echo "listing files in payer"
-              BASELINEFILES=$(aws s3 ls s3://performance-results-storage-bucket-coe/Baseline/Payer/ \
-                | awk '{print $4}'
-                | paste -sd "," -)
+              BASELINEFILES=$(aws s3 ls s3://performance-results-storage-bucket-coe/Baseline/Payer/ | awk '{print $4}' | paste -sd "," -)
               echo "Baseline files (oldest first):"
               echo "$BASELINEFILES"
