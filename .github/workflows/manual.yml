@@ -37,7 +37,7 @@ jobs:
   publish:
     needs: pullBaseline
     runs-on: ubuntu-latest
-    environment: : publishConfluence
+    environment: publishConfluence
     steps:
       - name: Publish to confluence
         run: echo "Publishing now"
