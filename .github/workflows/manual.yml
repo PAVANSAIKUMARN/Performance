@@ -22,8 +22,11 @@ on:
 jobs:
   pullBaseline:
     runs-on: ubuntu-latest
+    outputs:
+      build_date: ${{ steps.set_date.outputs.build_date }}
     steps:
       - name : Get Baseline
+        id: set_date
         run: |
               $currentDate = Get-Date -Format "yyyy-MM-dd_HH_mm_ss"
               echo "build_date=$currentDate" >> $env:GITHUB_OUTPUT
