@@ -27,6 +27,7 @@ jobs:
     steps:
       - name : Get Baseline
         id: set_date
+        shell: pwsh
         run: |
               $currentDate = Get-Date -Format "yyyy-MM-dd_HH_mm_ss"
               echo "build_date=$currentDate" >> $env:GITHUB_OUTPUT
@@ -38,6 +39,7 @@ jobs:
     environment: publishConfluence
     steps:
       - name: Publish to confluence
+        shell: pwsh
         run: |
           echo "Build date ${{needs.pullBaseline.outputs.build_date}}"
           echo "Publishing now"
