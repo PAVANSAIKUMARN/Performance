@@ -25,6 +25,8 @@ jobs:
     steps:
       - name : Get Baseline
         run: |
+              $currentDate = Get-Date -Format "yyyy-MM-dd_HH_mm_ss"
+              echo "build_date=$currentDate" >> $env:GITHUB_OUTPUT
               echo "listing files in payer"
               echo "Baseline files (oldest first):"
   publish:
@@ -33,4 +35,6 @@ jobs:
     environment: publishConfluence
     steps:
       - name: Publish to confluence
-        run: echo "Publishing now"
+        run: |
+          echo "Build date ${{needs.pullBaseline.outputs.build_date}}"
+          echo "Publishing now"
