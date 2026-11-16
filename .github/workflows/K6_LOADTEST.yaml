@@ -13,6 +13,8 @@ on:
         description: "API tags to test (comma-separated). Leave empty to test all."
         required: false
         default: ""
+  schedule:
+    - cron: "0 9 * * 1-5"   # weekdays at 09:00 UTC — adjust as needed
 
 env:
   K6_DIR: ./k6_tests
@@ -159,23 +161,18 @@ jobs:
             summary.json
             results.json
 
-      # ── 8a. Sparse-checkout generate_html.py ──────────────────────────────
-      - name: Checkout HTML generator
-        if: always()
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            generate_html.py
-          sparse-checkout-cone-mode: false
-          path: repo-src
-
-      # ── 8b. Generate HTML report ───────────────────────────────────────────
+      # ── 8a. Download generate_html.py from this commit ────────────────────
       - name: Generate HTML report
         if: always()
         run: |
+          curl -fsSL \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/generate_html.py?ref=${{ github.sha }}" \
+            -o generate_html.py
           mkdir -p report
-          python repo-src/generate_html.py results.json -o report/index.html
-          echo "✅ HTML report generated"
+          python3 generate_html.py results.json -o report/index.html
+          echo "HTML report generated"
 
       # ── 8c. Upload HTML report artifact ───────────────────────────────────
       - name: Upload HTML report artifact
