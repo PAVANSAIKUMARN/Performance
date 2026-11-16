@@ -99,6 +99,8 @@ jobs:
         run: |
           set +e
           k6 run \
+            --vus 1 \
+            --duration 30s \
             --summary-export=../summary.json \
             --out json=../results.json \
             $(ls *.js | head -1) \
@@ -151,7 +153,15 @@ jobs:
             summary.json
             results.json
 
-      # ── 9. Print summary + full k6 output ─────────────────────────────────
+      # ── 9. Always print the run URL first (visible even if later steps fail) ──
+      - name: Print run URL
+        if: always()
+        run: |
+          echo ""
+          echo "  👉 Full report: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo ""
+
+      # ── 10. Print summary + full k6 output ────────────────────────────────
       - name: Print test summary
         if: always()
         run: |
@@ -170,7 +180,7 @@ jobs:
           echo "  Checks Failed : ${{ steps.metrics.outputs.checks_fail }}"
           echo "  Parameterized : ${{ steps.metrics.outputs.parameterized }}"
           echo "========================================"
-          echo "  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "  👉 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           echo "========================================"
           echo ""
           echo "──────── k6 Output ─────────────────────"
