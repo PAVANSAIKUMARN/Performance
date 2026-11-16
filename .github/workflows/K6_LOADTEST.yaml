@@ -14,7 +14,6 @@ on:
         required: false
         default: ""
 
-
 env:
   K6_DIR: ./k6_tests
 
@@ -180,17 +179,15 @@ jobs:
       - name: Analyse k6 results
         id: analyse
         if: always()
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          curl -fsSL \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            -H "Accept: application/vnd.github.v3.raw" \
-            "https://api.github.com/repos/${{ github.repository }}/contents/analyse_results.py?ref=${{ github.sha }}" \
-            -o analyse_results.py
-          python3 analyse_results.py results.json >> "$GITHUB_STEP_SUMMARY"
-          VERDICT=$(cat verdict.txt 2>/dev/null || echo "UNKNOWN")
+          API_URL="${{ inputs.k6_api_url || secrets.K6_API_URL }}"
+          RESPONSE=$(curl -f -sS -X POST \
+            "${API_URL}/analyse" \
+            -F "file=@results.json" \
+            2>/dev/null || echo '{"verdict":"UNKNOWN","markdown":"⚠️ Analysis skipped — API unreachable."}')
+          VERDICT=$(echo "$RESPONSE" | jq -r '.verdict // "UNKNOWN"')
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "$RESPONSE" | jq -r '.markdown // ""' >> "$GITHUB_STEP_SUMMARY"
 
       # ── 9. Always print the run URL first (visible even if later steps fail) ──
       - name: Print run URL
