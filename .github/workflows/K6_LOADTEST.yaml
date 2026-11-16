@@ -74,12 +74,11 @@ jobs:
       # ── 5. Install k6 ──────────────────────────────────────────────────────
       - name: Install k6
         run: |
-          sudo gpg --no-default-keyring \
-            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
-            --keyserver hkp://keyserver.ubuntu.com:80 \
-            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] \
-            https://dl.k6.io/deb stable main" \
+          curl -sS https://dl.k6.io/key.gpg \
+            | sudo gpg --no-default-keyring \
+                --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+                --import
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
             | sudo tee /etc/apt/sources.list.d/k6.list
           sudo apt-get update -qq
           sudo apt-get install -y k6
@@ -143,61 +142,28 @@ jobs:
             results.json
 
       # ── 9. Post Adaptive Card to Teams ─────────────────────────────────────
-      - name: Post results to Microsoft Teams
+      # ── 9. Print summary + full k6 output to logs ─────────────────────────────
+      - name: Print test summary
         if: always()
         run: |
-          curl -sS -X POST "${{ secrets.TEAMS_WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "type": "message",
-              "attachments": [{
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "content": {
-                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                  "type": "AdaptiveCard",
-                  "version": "1.5",
-                  "msteams": { "width": "Full" },
-                  "body": [
-                    {
-                      "type": "ColumnSet",
-                      "columns": [{
-                        "type": "Column",
-                        "width": "stretch",
-                        "items": [{
-                          "type": "TextBlock",
-                          "text": "${{ steps.metrics.outputs.icon }} k6 Load Test — ${{ steps.metrics.outputs.status }}",
-                          "size": "Large",
-                          "weight": "Bolder",
-                          "wrap": true
-                        }]
-                      }]
-                    },
-                    {
-                      "type": "FactSet",
-                      "facts": [
-                        { "title": "Repository",        "value": "${{ github.repository }}" },
-                        { "title": "Branch",            "value": "${{ github.ref_name }}" },
-                        { "title": "Run",               "value": "#${{ github.run_number }}" },
-                        { "title": "Trigger",           "value": "${{ github.event_name }}" },
-                        { "title": "Virtual Users",     "value": "${{ steps.metrics.outputs.vus }}" },
-                        { "title": "Total Requests",    "value": "${{ steps.metrics.outputs.reqs }}" },
-                        { "title": "Error Rate",        "value": "${{ steps.metrics.outputs.err_rate }}%" },
-                        { "title": "Avg Response Time", "value": "${{ steps.metrics.outputs.avg }} ms" },
-                        { "title": "p95 Response Time", "value": "${{ steps.metrics.outputs.p95 }} ms" },
-                        { "title": "Checks Passed",     "value": "${{ steps.metrics.outputs.checks_pass }}" },
-                        { "title": "Checks Failed",     "value": "${{ steps.metrics.outputs.checks_fail }}" },
-                        { "title": "Parameterized",     "value": "${{ steps.metrics.outputs.parameterized }}" }
-                      ]
-                    },
-                    {
-                      "type": "ActionSet",
-                      "actions": [{
-                        "type": "Action.OpenUrl",
-                        "title": "View Full Run →",
-                        "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-                      }]
-                    }
-                  ]
-                }
-              }]
-            }'
+          echo "========================================"
+          echo "  k6 Load Test — ${{ steps.metrics.outputs.icon }} ${{ steps.metrics.outputs.status }}"
+          echo "========================================"
+          echo "  Repository    : ${{ github.repository }}"
+          echo "  Branch        : ${{ github.ref_name }}"
+          echo "  Run           : #${{ github.run_number }}"
+          echo "  Virtual Users : ${{ steps.metrics.outputs.vus }}"
+          echo "  Total Requests: ${{ steps.metrics.outputs.reqs }}"
+          echo "  Error Rate    : ${{ steps.metrics.outputs.err_rate }}%"
+          echo "  Avg Response  : ${{ steps.metrics.outputs.avg }} ms"
+          echo "  p95 Response  : ${{ steps.metrics.outputs.p95 }} ms"
+          echo "  Checks Passed : ${{ steps.metrics.outputs.checks_pass }}"
+          echo "  Checks Failed : ${{ steps.metrics.outputs.checks_fail }}"
+          echo "  Parameterized : ${{ steps.metrics.outputs.parameterized }}"
+          echo "========================================"
+          echo "  Run URL:"
+          echo "  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "========================================"
+          echo ""
+          echo "──────── k6 Output ─────────────────────"
+          cat k6_output.txt
