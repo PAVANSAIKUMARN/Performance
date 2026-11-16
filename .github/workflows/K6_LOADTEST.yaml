@@ -13,8 +13,7 @@ on:
         description: "API tags to test (comma-separated). Leave empty to test all."
         required: false
         default: ""
-  schedule:
-    - cron: "0 9 * * 1-5"   # weekdays at 09:00 UTC — adjust as needed
+
 
 env:
   K6_DIR: ./k6_tests
@@ -186,6 +185,8 @@ jobs:
       - name: Setup Pages
         if: always()
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload Pages artifact
         if: always()
