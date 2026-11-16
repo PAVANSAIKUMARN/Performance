@@ -72,23 +72,30 @@ jobs:
             echo "ℹ️  No data.csv — public/unauthenticated test"
           fi
 
-      # ── 5. Run k6 via Docker (no install needed) ───────────────────────────────
+      # ── 5. Install k6 (direct binary download — no apt, no GPG, no Docker) ────
+      - name: Install k6
+        run: |
+          K6_VERSION=$(curl -sS https://api.github.com/repos/grafana/k6/releases/latest \
+            | jq -r '.tag_name')
+          curl -sS -L \
+            "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-amd64.tar.gz" \
+            | tar xz
+          sudo mv "k6-${K6_VERSION}-linux-amd64/k6" /usr/local/bin/k6
+          k6 version
+
+      # ── 6. Run k6 ──────────────────────────────────────────────────────────
       - name: Run k6 load test
         id: k6
+        working-directory: ${{ env.K6_DIR }}
         run: |
-          SCRIPT=$(ls ${{ env.K6_DIR }}/*.js | head -1 | xargs basename)
           set +e
-          docker run --rm \
-            -v "${{ github.workspace }}/${{ env.K6_DIR }}:/scripts" \
-            grafana/k6 run \
-              --summary-export=/scripts/summary.json \
-              --out json=/scripts/results.json \
-              "/scripts/${SCRIPT}" \
-            2>&1 | tee k6_output.txt
+          k6 run \
+            --summary-export=../summary.json \
+            --out json=../results.json \
+            $(ls *.js | head -1) \
+            2>&1 | tee ../k6_output.txt
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
-          cp ${{ env.K6_DIR }}/summary.json summary.json
-          cp ${{ env.K6_DIR }}/results.json results.json
 
       # ── 7. Parse metrics ───────────────────────────────────────────────────
       - name: Parse k6 metrics
