@@ -46,8 +46,9 @@ jobs:
       # ── 3. Call generator API → download zip ───────────────────────────────
       - name: Generate k6 test bundle
         run: |
+          K6_API_URL="${{ inputs.K6_API_URL || secrets.K6_API_URL }}"
           curl -f -sS -X POST \
-            "${{ secrets.K6_API_URL }}/generate${{ steps.tags.outputs.query }}" \
+            "$K6_API_URL/generate${{ steps.tags.outputs.query }}" \
             -F "file=@swagger.json" \
             -o k6_tests.zip
           echo "Downloaded $(du -sh k6_tests.zip | cut -f1) zip"
