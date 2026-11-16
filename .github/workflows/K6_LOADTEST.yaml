@@ -1,0 +1,196 @@
+name: k6 Load Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      swagger_url:
+        description: "URL to the Swagger/OpenAPI spec (e.g. https://myapi.com/swagger.json)"
+        required: true
+      tags:
+        description: "API tags to test (comma-separated). Leave empty to test all."
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 9 * * 1-5"   # weekdays at 09:00 UTC — adjust as needed
+
+env:
+  K6_DIR: ./k6_tests
+
+jobs:
+  load-test:
+    name: Generate & Run k6 Load Test
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Fetch swagger spec from URL ─────────────────────────────────────
+      - name: Fetch Swagger spec
+        run: |
+          SWAGGER_URL="${{ inputs.swagger_url || secrets.SWAGGER_URL }}"
+          curl -f -sS "$SWAGGER_URL" -o swagger.json
+          echo "Fetched spec: $(wc -c < swagger.json) bytes"
+
+      # ── 2. Build ?tags= query string ───────────────────────────────────────
+      - name: Build tag query params
+        id: tags
+        run: |
+          TAGS="${{ inputs.tags }}"
+          QUERY=""
+          if [ -n "$TAGS" ]; then
+            IFS=',' read -ra TAG_ARR <<< "$TAGS"
+            for tag in "${TAG_ARR[@]}"; do
+              tag=$(echo "$tag" | xargs)
+              QUERY="${QUERY}&tags=${tag}"
+            done
+            QUERY="?${QUERY:1}"
+          fi
+          echo "query=${QUERY}" >> "$GITHUB_OUTPUT"
+
+      # ── 3. Call generator API → download zip ───────────────────────────────
+      - name: Generate k6 test bundle
+        run: |
+          curl -f -sS -X POST \
+            "${{ secrets.K6_API_URL }}/generate${{ steps.tags.outputs.query }}" \
+            -F "file=@swagger.json" \
+            -o k6_tests.zip
+          echo "Downloaded $(du -sh k6_tests.zip | cut -f1) zip"
+
+      # ── 4. Unzip ───────────────────────────────────────────────────────────
+      - name: Extract test bundle
+        run: |
+          mkdir -p "${{ env.K6_DIR }}"
+          unzip -o k6_tests.zip -d "${{ env.K6_DIR }}/"
+          echo "Extracted files:"
+          ls -lh "${{ env.K6_DIR }}/"
+          if [ -f "${{ env.K6_DIR }}/data.csv" ]; then
+            echo "data_csv=true" >> "$GITHUB_ENV"
+            echo "✅ data.csv present — parameterized test"
+          else
+            echo "data_csv=false" >> "$GITHUB_ENV"
+            echo "ℹ️  No data.csv — public/unauthenticated test"
+          fi
+
+      # ── 5. Install k6 ──────────────────────────────────────────────────────
+      - name: Install k6
+        run: |
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] \
+            https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update -qq
+          sudo apt-get install -y k6
+
+      # ── 6. Run k6 ──────────────────────────────────────────────────────────
+      - name: Run k6 load test
+        id: k6
+        working-directory: ${{ env.K6_DIR }}
+        run: |
+          set +e
+          k6 run \
+            --summary-export=../summary.json \
+            --out json=../results.json \
+            $(ls *.js | head -1) \
+            2>&1 | tee ../k6_output.txt
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      # ── 7. Parse metrics ───────────────────────────────────────────────────
+      - name: Parse k6 metrics
+        id: metrics
+        run: |
+          REQS=$(jq -r '.metrics.http_reqs.values.count // 0' summary.json)
+          ERR_RATE=$(jq -r '((.metrics.http_req_failed.values.rate // 0) * 100) | round' summary.json)
+          P95=$(jq -r '(.metrics.http_req_duration.values["p(95)"] // 0) | round' summary.json)
+          AVG=$(jq -r '(.metrics.http_req_duration.values.avg // 0) | round' summary.json)
+          VUS=$(jq -r '.metrics.vus_max.values.max // 0' summary.json)
+          CHECKS_PASS=$(jq -r '.metrics.checks.values.passes // 0' summary.json)
+          CHECKS_FAIL=$(jq -r '.metrics.checks.values.fails // 0' summary.json)
+
+          if [ "${{ steps.k6.outputs.exit_code }}" = "0" ]; then
+            STATUS="Passed" ; ICON="✅"
+          else
+            STATUS="Failed" ; ICON="❌"
+          fi
+
+          echo "reqs=$REQS"               >> "$GITHUB_OUTPUT"
+          echo "err_rate=$ERR_RATE"       >> "$GITHUB_OUTPUT"
+          echo "p95=$P95"                 >> "$GITHUB_OUTPUT"
+          echo "avg=$AVG"                 >> "$GITHUB_OUTPUT"
+          echo "vus=$VUS"                 >> "$GITHUB_OUTPUT"
+          echo "checks_pass=$CHECKS_PASS" >> "$GITHUB_OUTPUT"
+          echo "checks_fail=$CHECKS_FAIL" >> "$GITHUB_OUTPUT"
+          echo "status=$STATUS"           >> "$GITHUB_OUTPUT"
+          echo "icon=$ICON"               >> "$GITHUB_OUTPUT"
+
+      # ── 8. Upload artifacts ────────────────────────────────────────────────
+      - name: Upload k6 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-results-${{ github.run_number }}
+          path: |
+            k6_output.txt
+            summary.json
+            results.json
+
+      # ── 9. Post Adaptive Card to Teams ─────────────────────────────────────
+      - name: Post results to Microsoft Teams
+        if: always()
+        run: |
+          curl -sS -X POST "${{ secrets.TEAMS_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "type": "message",
+              "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                  "type": "AdaptiveCard",
+                  "version": "1.5",
+                  "msteams": { "width": "Full" },
+                  "body": [
+                    {
+                      "type": "ColumnSet",
+                      "columns": [{
+                        "type": "Column",
+                        "width": "stretch",
+                        "items": [{
+                          "type": "TextBlock",
+                          "text": "${{ steps.metrics.outputs.icon }} k6 Load Test — ${{ steps.metrics.outputs.status }}",
+                          "size": "Large",
+                          "weight": "Bolder",
+                          "wrap": true
+                        }]
+                      }]
+                    },
+                    {
+                      "type": "FactSet",
+                      "facts": [
+                        { "title": "Repository",        "value": "${{ github.repository }}" },
+                        { "title": "Branch",            "value": "${{ github.ref_name }}" },
+                        { "title": "Run",               "value": "#${{ github.run_number }}" },
+                        { "title": "Trigger",           "value": "${{ github.event_name }}" },
+                        { "title": "Virtual Users",     "value": "${{ steps.metrics.outputs.vus }}" },
+                        { "title": "Total Requests",    "value": "${{ steps.metrics.outputs.reqs }}" },
+                        { "title": "Error Rate",        "value": "${{ steps.metrics.outputs.err_rate }}%" },
+                        { "title": "Avg Response Time", "value": "${{ steps.metrics.outputs.avg }} ms" },
+                        { "title": "p95 Response Time", "value": "${{ steps.metrics.outputs.p95 }} ms" },
+                        { "title": "Checks Passed",     "value": "${{ steps.metrics.outputs.checks_pass }}" },
+                        { "title": "Checks Failed",     "value": "${{ steps.metrics.outputs.checks_fail }}" },
+                        { "title": "Parameterized",     "value": "${{ env.data_csv == '\''true'\'' && '\''Yes (data.csv)'\'' || '\''No'\'' }}" }
+                      ]
+                    },
+                    {
+                      "type": "ActionSet",
+                      "actions": [{
+                        "type": "Action.OpenUrl",
+                        "title": "View Full Run →",
+                        "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                      }]
+                    }
+                  ]
+                }
+              }]
+            }'
