@@ -6,6 +6,9 @@ on:
       swagger_url:
         description: "URL to the Swagger/OpenAPI spec (e.g. https://myapi.com/swagger.json)"
         required: true
+      k6_api_url:
+        description: "URL of the k6 generator API (e.g. https://abc123-8000.vscode-tunnel.ms)"
+        required: true
       tags:
         description: "API tags to test (comma-separated). Leave empty to test all."
         required: false
@@ -46,9 +49,9 @@ jobs:
       # ── 3. Call generator API → download zip ───────────────────────────────
       - name: Generate k6 test bundle
         run: |
-          K6_API_URL="${{ inputs.K6_API_URL || secrets.K6_API_URL }}"
+          API_URL="${{ inputs.k6_api_url || secrets.K6_API_URL }}"
           curl -f -sS -X POST \
-            "$K6_API_URL/generate${{ steps.tags.outputs.query }}" \
+            "${API_URL}/generate${{ steps.tags.outputs.query }}" \
             -F "file=@swagger.json" \
             -o k6_tests.zip
           echo "Downloaded $(du -sh k6_tests.zip | cut -f1) zip"
