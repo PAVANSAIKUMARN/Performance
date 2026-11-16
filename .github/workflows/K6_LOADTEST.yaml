@@ -14,7 +14,6 @@ on:
         required: false
         default: ""
 
-
 env:
   K6_DIR: ./k6_tests
 
@@ -22,6 +21,13 @@ jobs:
   load-test:
     name: Generate & Run k6 Load Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pages_deploy.outputs.page_url }}
 
     steps:
       # ── 1. Install k6 ──────────────────────────────────────────────────────
@@ -153,12 +159,55 @@ jobs:
             summary.json
             results.json
 
+      # ── 8a. Sparse-checkout generate_html.py ──────────────────────────────
+      - name: Checkout HTML generator
+        if: always()
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            generate_html.py
+          sparse-checkout-cone-mode: false
+          path: repo-src
+
+      # ── 8b. Generate HTML report ───────────────────────────────────────────
+      - name: Generate HTML report
+        if: always()
+        run: |
+          mkdir -p report
+          python repo-src/generate_html.py results.json -o report/index.html
+          echo "✅ HTML report generated"
+
+      # ── 8c. Upload HTML report artifact ───────────────────────────────────
+      - name: Upload HTML report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-html-report-${{ github.run_number }}
+          path: report/index.html
+
+      # ── 8d. Deploy HTML to GitHub Pages ────────────────────────────────────
+      - name: Setup Pages
+        if: always()
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './report'
+
+      - name: Deploy to GitHub Pages
+        if: always()
+        id: pages_deploy
+        uses: actions/deploy-pages@v4
+
       # ── 9. Always print the run URL first (visible even if later steps fail) ──
       - name: Print run URL
         if: always()
         run: |
           echo ""
-          echo "  👉 Full report: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "  👉 Actions run : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "  📊 HTML report : ${{ steps.pages_deploy.outputs.page_url }}"
           echo ""
 
       # ── 10. Print summary + full k6 output ────────────────────────────────
