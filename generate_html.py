@@ -1,238 +1,264 @@
-name: k6 Load Test
+#!/usr/bin/env python3
+"""
+Generic k6 JSON-to-HTML report generator.
+Input: k6 JSON output produced with: k6 run --out json=results.json script.js
+No Python dependencies required.
+"""
+import argparse
+import datetime as dt
+import html
+import json
+import math
+import statistics
+from collections import defaultdict
+from pathlib import Path
 
-on:
-  workflow_dispatch:
-    inputs:
-      swagger_url:
-        description: "URL to the Swagger/OpenAPI spec (e.g. https://myapi.com/swagger.json)"
-        required: true
-      k6_api_url:
-        description: "URL of the k6 generator API (e.g. https://abc123-8000.vscode-tunnel.ms)"
-        required: true
-      tags:
-        description: "API tags to test (comma-separated). Leave empty to test all."
-        required: false
-        default: ""
-  schedule:
-    - cron: "0 9 * * 1-5"   # weekdays at 09:00 UTC — adjust as needed
 
-env:
-  K6_DIR: ./k6_tests
+def percentile(values, p):
+    if not values:
+        return 0.0
+    vals = sorted(values)
+    if len(vals) == 1:
+        return float(vals[0])
+    rank = (len(vals) - 1) * p / 100.0
+    lo = math.floor(rank)
+    hi = math.ceil(rank)
+    if lo == hi:
+        return float(vals[lo])
+    return float(vals[lo] + (vals[hi] - vals[lo]) * (rank - lo))
 
-jobs:
-  load-test:
-    name: Generate & Run k6 Load Test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.pages_deploy.outputs.page_url }}
 
-    steps:
-      # ── 1. Install k6 ──────────────────────────────────────────────────────
-      - name: Install k6
-        run: |
-          K6_VERSION=$(curl -sS \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            https://api.github.com/repos/grafana/k6/releases/latest \
-            | jq -r '.tag_name')
-          echo "Installing k6 ${K6_VERSION}"
-          curl -sS -L \
-            "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-amd64.tar.gz" \
-            -o k6.tar.gz
-          tar xzf k6.tar.gz
-          sudo mv "k6-${K6_VERSION}-linux-amd64/k6" /usr/local/bin/k6
-          k6 version
+def stats(values):
+    if not values:
+        return {"count": 0, "avg": 0, "min": 0, "max": 0,
+                "p90": 0, "p95": 0, "p99": 0}
+    return {
+        "count": len(values), "avg": statistics.fmean(values),
+        "min": min(values), "max": max(values),
+        "p90": percentile(values, 90), "p95": percentile(values, 95),
+        "p99": percentile(values, 99),
+    }
 
-      # ── 2. Fetch swagger spec from URL ─────────────────────────────────────
-      - name: Fetch Swagger spec
-        run: |
-          SWAGGER_URL="${{ inputs.swagger_url || secrets.SWAGGER_URL }}"
-          curl -f -sS "$SWAGGER_URL" -o swagger.json
-          echo "Fetched spec: $(wc -c < swagger.json) bytes"
 
-      # ── 3. Build ?tags= query string ───────────────────────────────────────
-      - name: Build tag query params
-        id: tags
-        run: |
-          TAGS="${{ inputs.tags }}"
-          QUERY=""
-          if [ -n "$TAGS" ]; then
-            IFS=',' read -ra TAG_ARR <<< "$TAGS"
-            for tag in "${TAG_ARR[@]}"; do
-              tag=$(echo "$tag" | xargs)
-              QUERY="${QUERY}&tags=${tag}"
-            done
-            QUERY="?${QUERY:1}"
-          fi
-          echo "query=${QUERY}" >> "$GITHUB_OUTPUT"
+def esc(value):
+    return html.escape(str(value))
 
-      # ── 4. Call generator API → download zip ───────────────────────────────
-      - name: Generate k6 test bundle
-        run: |
-          API_URL="${{ inputs.k6_api_url || secrets.K6_API_URL }}"
-          curl -f -sS -X POST \
-            "${API_URL}/generate${{ steps.tags.outputs.query }}" \
-            -F "file=@swagger.json" \
-            -o k6_tests.zip
-          echo "Downloaded $(du -sh k6_tests.zip | cut -f1) zip"
 
-      # ── 5. Unzip ───────────────────────────────────────────────────────────
-      - name: Extract test bundle
-        run: |
-          mkdir -p "${{ env.K6_DIR }}"
-          unzip -o k6_tests.zip -d "${{ env.K6_DIR }}/"
-          echo "Extracted files:"
-          ls -lh "${{ env.K6_DIR }}/"
-          if [ -f "${{ env.K6_DIR }}/data.csv" ]; then
-            echo "data_csv=true" >> "$GITHUB_ENV"
-            echo "✅ data.csv present — parameterized test"
-          else
-            echo "data_csv=false" >> "$GITHUB_ENV"
-            echo "ℹ️  No data.csv — public/unauthenticated test"
-          fi
+def fmt(value, suffix=" ms"):
+    return f"{value:.2f}{suffix}"
 
-      # ── 6. Syntax check (k6 inspect — no network calls, fails fast on bad JS) ──
-      - name: Validate k6 script syntax
-        working-directory: ${{ env.K6_DIR }}
-        run: k6 inspect $(ls *.js | head -1)
 
-      # ── 7. Run k6 ──────────────────────────────────────────────────────────
-      - name: Run k6 load test
-        id: k6
-        working-directory: ${{ env.K6_DIR }}
-        run: |
-          set +e
-          k6 run \
-            --vus 1 \
-            --duration 30s \
-            --summary-export=../summary.json \
-            --out json=../results.json \
-            $(ls *.js | head -1) \
-            2>&1 | tee ../k6_output.txt
-          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
-          set -e
+def svg_bars(rows, key, title, width=900, row_h=34):
+    usable = width - 260
+    max_v = max((r[key] for r in rows), default=0) or 1
+    height = max(90, 48 + row_h * len(rows))
+    parts = [f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{esc(title)}">']
+    parts.append('<style>.lbl{font:13px Arial;fill:#cbd5e1}.val{font:12px Arial;fill:#e2e8f0}.bar{fill:#38bdf8}</style>')
+    for i, row in enumerate(rows):
+        y = 28 + i * row_h
+        name = esc(row["name"])
+        v = row[key]
+        bar_w = max(1, usable * v / max_v)
+        parts.append(f'<text class="lbl" x="8" y="{y+13}">{name[:34]}</text>')
+        parts.append(f'<rect class="bar" x="250" y="{y}" width="{bar_w:.1f}" height="18" rx="4"/>')
+        parts.append(f'<text class="val" x="{min(250+bar_w+8,width-65):.1f}" y="{y+14}">{v:.1f} ms</text>')
+    parts.append("</svg>")
+    return "".join(parts)
 
-      # ── 7. Parse metrics ───────────────────────────────────────────────────
-      - name: Parse k6 metrics
-        id: metrics
-        if: always()
-        run: |
-          REQS=$(jq -r '.metrics.http_reqs.values.count // 0' summary.json 2>/dev/null || echo 0)
-          ERR_RATE=$(jq -r '((.metrics.http_req_failed.values.rate // 0) * 100) | round' summary.json 2>/dev/null || echo 0)
-          P95=$(jq -r '(.metrics.http_req_duration.values["p(95)"] // 0) | round' summary.json 2>/dev/null || echo 0)
-          AVG=$(jq -r '(.metrics.http_req_duration.values.avg // 0) | round' summary.json 2>/dev/null || echo 0)
-          VUS=$(jq -r '.metrics.vus_max.values.max // 0' summary.json 2>/dev/null || echo 0)
-          CHECKS_PASS=$(jq -r '.metrics.checks.values.passes // 0' summary.json 2>/dev/null || echo 0)
-          CHECKS_FAIL=$(jq -r '.metrics.checks.values.fails // 0' summary.json 2>/dev/null || echo 0)
 
-          if [ "${{ steps.k6.outputs.exit_code }}" = "0" ]; then
-            STATUS="Passed" ; ICON="✅"
-          else
-            STATUS="Failed" ; ICON="❌"
-          fi
+def parse_file(path):
+    groups = defaultdict(list)
+    requests = defaultdict(list)
+    failed = defaultdict(int)
+    statuses = defaultdict(int)
+    check_counts = defaultdict(lambda: [0, 0])
+    timestamps = []
+    total_http = 0
+    total_failed_http = 0
+    total_iterations = 0
+    total_vus = []
+    metric_samples = defaultdict(list)
 
-          echo "reqs=$REQS"               >> "$GITHUB_OUTPUT"
-          echo "err_rate=$ERR_RATE"       >> "$GITHUB_OUTPUT"
-          echo "p95=$P95"                 >> "$GITHUB_OUTPUT"
-          echo "avg=$AVG"                 >> "$GITHUB_OUTPUT"
-          echo "vus=$VUS"                 >> "$GITHUB_OUTPUT"
-          echo "checks_pass=$CHECKS_PASS" >> "$GITHUB_OUTPUT"
-          echo "checks_fail=$CHECKS_FAIL" >> "$GITHUB_OUTPUT"
-          echo "status=$STATUS"           >> "$GITHUB_OUTPUT"
-          echo "icon=$ICON"               >> "$GITHUB_OUTPUT"
-          if [ "$data_csv" = "true" ]; then
-            echo "parameterized=Yes (data.csv)" >> "$GITHUB_OUTPUT"
-          else
-            echo "parameterized=No" >> "$GITHUB_OUTPUT"
-          fi
+    with open(path, "r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                point = json.loads(line)
+            except json.JSONDecodeError:
+                # k6 JSON output is newline-delimited JSON; report malformed lines clearly.
+                continue
+            if point.get("type") != "Point":
+                continue
+            metric = point.get("metric", "")
+            data = point.get("data") or {}
+            tags = data.get("tags") or {}
+            value = data.get("value")
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
 
-      # ── 8. Upload artifacts ────────────────────────────────────────────────
-      - name: Upload k6 results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: k6-results-${{ github.run_number }}
-          path: |
-            k6_output.txt
-            summary.json
-            results.json
+            if data.get("time"):
+                try:
+                    timestamps.append(dt.datetime.fromisoformat(data["time"].replace("Z", "+00:00")))
+                except Exception:
+                    pass
 
-      # ── 8a. Sparse-checkout generate_html.py ──────────────────────────────
-      - name: Checkout HTML generator
-        if: always()
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            generate_html.py
-          sparse-checkout-cone-mode: false
-          path: repo-src
+            if metric == "group_duration":
+                # k6 normally records the current group path in the "group" tag.
+                name = tags.get("group") or tags.get("name") or "Ungrouped"
+                name = name.split("::")[-1] if name else "Ungrouped"
+                groups[name].append(value)
+            elif metric == "http_req_duration":
+                name = tags.get("name") or tags.get("url") or "Unnamed request"
+                requests[name].append(value)
+            elif metric == "http_reqs":
+                total_http += value
+            elif metric == "http_req_failed":
+                if value:
+                    total_failed_http += 1
+                    name = tags.get("name") or tags.get("url") or "Unnamed request"
+                    failed[name] += 1
+            elif metric == "http_req_duration":
+                pass
+            elif metric == "checks":
+                check_name = tags.get("check") or "Unnamed check"
+                check_counts[check_name][0] += 1
+                if value:
+                    check_counts[check_name][1] += 1
+            elif metric == "iterations":
+                total_iterations += value
+            elif metric == "vus":
+                total_vus.append(value)
+            else:
+                metric_samples[metric].append(value)
 
-      # ── 8b. Generate HTML report ───────────────────────────────────────────
-      - name: Generate HTML report
-        if: always()
-        run: |
-          mkdir -p report
-          python repo-src/generate_html.py results.json -o report/index.html
-          echo "✅ HTML report generated"
+            if metric == "http_reqs":
+                status = tags.get("status")
+                if status:
+                    statuses[str(status)] += value
 
-      # ── 8c. Upload HTML report artifact ───────────────────────────────────
-      - name: Upload HTML report artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: k6-html-report-${{ github.run_number }}
-          path: report/index.html
+    # Some k6 versions may emit http_req_failed as 0/1 rate points; count failed samples.
+    # Derive test duration from timestamps.
+    duration_s = 0.0
+    if len(timestamps) >= 2:
+        duration_s = max(0.0, (max(timestamps) - min(timestamps)).total_seconds())
 
-      # ── 8d. Deploy HTML to GitHub Pages ────────────────────────────────────
-      - name: Setup Pages
-        if: always()
-        uses: actions/configure-pages@v5
+    return {
+        "groups": {k: stats(v) for k, v in sorted(groups.items())},
+        "requests": {k: stats(v) for k, v in sorted(requests.items())},
+        "failed_by_request": dict(failed),
+        "statuses": dict(statuses),
+        "checks": dict(check_counts),
+        "http_reqs": int(total_http),
+        "failed_http_samples": int(total_failed_http),
+        "iterations": int(total_iterations),
+        "max_vus": max(total_vus, default=0),
+        "duration_s": duration_s,
+        "raw_metric_names": sorted(metric_samples),
+    }
 
-      - name: Upload Pages artifact
-        if: always()
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: './report'
 
-      - name: Deploy to GitHub Pages
-        if: always()
-        id: pages_deploy
-        uses: actions/deploy-pages@v4
+def table(rows, columns):
+    head = "".join(f"<th>{esc(col[0])}</th>" for col in columns)
+    body = []
+    for row in rows:
+        cells = "".join(f"<td>{renderer(row.get(key))}</td>" for _, key, renderer in columns)
+        body.append(f"<tr>{cells}</tr>")
+    return f"<div class='table-wrap'><table><thead><tr>{head}</tr></thead><tbody>{''.join(body) or '<tr><td colspan=\"9\">No samples found</td></tr>'}</tbody></table></div>"
 
-      # ── 9. Always print the run URL first (visible even if later steps fail) ──
-      - name: Print run URL
-        if: always()
-        run: |
-          echo ""
-          echo "  👉 Actions run : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          echo "  📊 HTML report : ${{ steps.pages_deploy.outputs.page_url }}"
-          echo ""
 
-      # ── 10. Print summary + full k6 output ────────────────────────────────
-      - name: Print test summary
-        if: always()
-        run: |
-          echo "========================================"
-          echo "  k6 Load Test — ${{ steps.metrics.outputs.icon }} ${{ steps.metrics.outputs.status }}"
-          echo "========================================"
-          echo "  Repository    : ${{ github.repository }}"
-          echo "  Branch        : ${{ github.ref_name }}"
-          echo "  Run           : #${{ github.run_number }}"
-          echo "  Virtual Users : ${{ steps.metrics.outputs.vus }}"
-          echo "  Total Requests: ${{ steps.metrics.outputs.reqs }}"
-          echo "  Error Rate    : ${{ steps.metrics.outputs.err_rate }}%"
-          echo "  Avg Response  : ${{ steps.metrics.outputs.avg }} ms"
-          echo "  p95 Response  : ${{ steps.metrics.outputs.p95 }} ms"
-          echo "  Checks Passed : ${{ steps.metrics.outputs.checks_pass }}"
-          echo "  Checks Failed : ${{ steps.metrics.outputs.checks_fail }}"
-          echo "  Parameterized : ${{ steps.metrics.outputs.parameterized }}"
-          echo "========================================"
-          echo "  👉 ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          echo "========================================"
-          echo ""
-          echo "──────── k6 Output ─────────────────────"
-          cat k6_output.txt 2>/dev/null || echo "(no output)"
+def identity(v):
+    return esc(v if v is not None else "-")
+
+
+def ms(v):
+    return fmt(float(v or 0))
+
+
+def count(v):
+    return f"{int(v or 0):,}"
+
+
+def build_report(data, input_name, output):
+    groups = [{"name": k, **v} for k, v in data["groups"].items()]
+    requests = [{"name": k, **v} for k, v in data["requests"].items()]
+    check_rows = []
+    for name, (total, passed) in data["checks"].items():
+        check_rows.append({"name": name, "total": total, "passed": passed,
+                           "failed": total-passed,
+                           "rate": (passed/total*100) if total else 0})
+    group_table = table(groups, [
+        ("Transaction", "name", identity), ("Executions", "count", count),
+        ("Avg", "avg", ms), ("Min", "min", ms), ("Max", "max", ms),
+        ("P90", "p90", ms), ("P95", "p95", ms), ("P99", "p99", ms)])
+    request_table = table(requests, [
+        ("API request", "name", identity), ("Samples", "count", count),
+        ("Avg", "avg", ms), ("Min", "min", ms), ("Max", "max", ms),
+        ("P90", "p90", ms), ("P95", "p95", ms), ("P99", "p99", ms)])
+    check_table = table(check_rows, [
+        ("Check", "name", identity), ("Total", "total", count),
+        ("Passed", "passed", count), ("Failed", "failed", count),
+        ("Pass rate", "rate", lambda v: f"{v:.1f}%")])
+    avg_chart = svg_bars(groups, "avg", "Average transaction duration")
+    p95_chart = svg_bars(groups, "p95", "P95 transaction duration")
+    duration = f"{data['duration_s']:.1f} s" if data["duration_s"] else "N/A"
+    fail_rate = (data["failed_http_samples"] / data["http_reqs"] * 100) if data["http_reqs"] else 0
+    generated = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    html_doc = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>k6 Performance Test Report</title>
+<style>
+:root{{--bg:#0b1220;--panel:#111c2f;--panel2:#17243a;--text:#e5edf8;--muted:#9aabc2;--line:#263750;--blue:#38bdf8;--green:#34d399;--red:#fb7185}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,Segoe UI,Arial,sans-serif}}
+.wrap{{max-width:1440px;margin:auto;padding:28px}}header{{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:24px}}
+h1{{font-size:28px;margin:0 0 5px}}h2{{font-size:18px;margin:0 0 16px}}h3{{font-size:14px;color:var(--muted);font-weight:500;margin:0 0 8px}}
+.muted,.meta{{color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:18px 0 24px}}
+.card,.section{{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}}
+.value{{font-size:27px;font-weight:700;letter-spacing:-.5px}}.good{{color:var(--green)}}.bad{{color:var(--red)}}
+.section{{margin:16px 0}}.charts{{display:grid;grid-template-columns:1fr 1fr;gap:14px}}svg{{width:100%;height:auto;display:block}}
+.table-wrap{{overflow-x:auto}}table{{width:100%;border-collapse:collapse;white-space:nowrap}}th,td{{padding:11px 12px;text-align:left;border-bottom:1px solid var(--line)}}
+th{{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}}td:first-child{{font-weight:600}}tbody tr:hover{{background:var(--panel2)}}
+footer{{color:var(--muted);padding:18px 2px;font-size:12px}}.pill{{display:inline-block;padding:4px 9px;border-radius:99px;background:var(--panel2);color:var(--blue)}}
+@media(max-width:850px){{.grid{{grid-template-columns:repeat(2,1fr)}}.charts{{grid-template-columns:1fr}}header{{display:block}}}}
+@media(max-width:480px){{.wrap{{padding:14px}}.grid{{grid-template-columns:1fr 1fr}}.value{{font-size:21px}}}}
+</style></head><body><main class="wrap">
+<header><div><span class="pill">k6 PERFORMANCE REPORT</span><h1>Test execution overview</h1>
+<div class="meta">Source: {esc(input_name)} · Generated: {esc(generated)}</div></div><div class="meta">Standalone HTML report</div></header>
+<section class="grid">
+<div class="card"><h3>HTTP requests</h3><div class="value">{data['http_reqs']:,}</div></div>
+<div class="card"><h3>Iterations</h3><div class="value">{data['iterations']:,}</div></div>
+<div class="card"><h3>Max observed VUs</h3><div class="value">{data['max_vus']:g}</div></div>
+<div class="card"><h3>Observed duration</h3><div class="value">{duration}</div></div>
+<div class="card"><h3>HTTP failures</h3><div class="value {'bad' if data['failed_http_samples'] else 'good'}">{data['failed_http_samples']:,}</div></div>
+<div class="card"><h3>HTTP failure ratio*</h3><div class="value {'bad' if fail_rate else 'good'}">{fail_rate:.2f}%</div></div>
+<div class="card"><h3>Transactions found</h3><div class="value">{len(groups)}</div></div>
+<div class="card"><h3>API request names found</h3><div class="value">{len(requests)}</div></div>
+</section>
+<section class="section"><h2>Transaction summary</h2>{group_table}</section>
+<section class="section"><h2>Transaction response-time comparison</h2><div class="charts"><div><h3>Average duration</h3>{avg_chart}</div><div><h3>P95 duration</h3>{p95_chart}</div></div></section>
+<section class="section"><h2>API request details</h2>{request_table}</section>
+<section class="section"><h2>Checks</h2>{check_table}</section>
+<section class="section"><h2>HTTP status distribution</h2>
+{table([{"status":k,"count":v} for k,v in sorted(data["statuses"].items())],
+[("HTTP status","status",identity),("Requests","count",count)])}</section>
+<footer>* HTTP failure ratio is an estimate from emitted http_req_failed samples divided by http_reqs. Transaction duration uses k6 group_duration samples and includes time spent inside the group, including sleep(). Percentiles are calculated from recorded samples. This report only includes metrics present in the input JSON.</footer>
+</main></body></html>"""
+    Path(output).write_text(html_doc, encoding="utf-8")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate a standalone HTML report from k6 JSON output.")
+    parser.add_argument("input", help="k6 newline-delimited JSON output file")
+    parser.add_argument("-o", "--output", default="k6-report.html", help="HTML report path")
+    args = parser.parse_args()
+    data = parse_file(args.input)
+    build_report(data, Path(args.input).name, args.output)
+    print(f"HTML report generated: {Path(args.output).resolve()}")
+    print(f"Transactions: {len(data['groups'])} | Named API requests: {len(data['requests'])}")
+
+
+if __name__ == "__main__":
+    main()
