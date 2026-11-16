@@ -10,8 +10,6 @@ on:
         description: "API tags to test (comma-separated). Leave empty to test all."
         required: false
         default: ""
-  schedule:
-    - cron: "0 9 * * 1-5"   # weekdays at 09:00 UTC — adjust as needed
 
 env:
   K6_DIR: ./k6_tests
@@ -123,6 +121,11 @@ jobs:
           echo "checks_fail=$CHECKS_FAIL" >> "$GITHUB_OUTPUT"
           echo "status=$STATUS"           >> "$GITHUB_OUTPUT"
           echo "icon=$ICON"               >> "$GITHUB_OUTPUT"
+          if [ "$data_csv" = "true" ]; then
+            echo "parameterized=Yes (data.csv)" >> "$GITHUB_OUTPUT"
+          else
+            echo "parameterized=No" >> "$GITHUB_OUTPUT"
+          fi
 
       # ── 8. Upload artifacts ────────────────────────────────────────────────
       - name: Upload k6 results
@@ -179,7 +182,7 @@ jobs:
                         { "title": "p95 Response Time", "value": "${{ steps.metrics.outputs.p95 }} ms" },
                         { "title": "Checks Passed",     "value": "${{ steps.metrics.outputs.checks_pass }}" },
                         { "title": "Checks Failed",     "value": "${{ steps.metrics.outputs.checks_fail }}" },
-                        { "title": "Parameterized",     "value": "${{ env.data_csv == '\''true'\'' && '\''Yes (data.csv)'\'' || '\''No'\'' }}" }
+                        { "title": "Parameterized",     "value": "${{ steps.metrics.outputs.parameterized }}" }
                       ]
                     },
                     {
