@@ -24,11 +24,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.pages_deploy.outputs.page_url }}
 
     steps:
       # ── 1. Install k6 ──────────────────────────────────────────────────────
@@ -181,23 +176,21 @@ jobs:
           name: k6-html-report-${{ github.run_number }}
           path: report/index.html
 
-      # ── 8d. Deploy HTML to GitHub Pages ────────────────────────────────────
-      - name: Setup Pages
+      # ── 8d. AI analysis → GO / NO-GO verdict ──────────────────────────────
+      - name: Analyse k6 results
+        id: analyse
         if: always()
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
-      - name: Upload Pages artifact
-        if: always()
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: './report'
-
-      - name: Deploy to GitHub Pages
-        if: always()
-        id: pages_deploy
-        uses: actions/deploy-pages@v4
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          curl -fsSL \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github.v3.raw" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/analyse_results.py?ref=${{ github.sha }}" \
+            -o analyse_results.py
+          python3 analyse_results.py results.json >> "$GITHUB_STEP_SUMMARY"
+          VERDICT=$(cat verdict.txt 2>/dev/null || echo "UNKNOWN")
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
 
       # ── 9. Always print the run URL first (visible even if later steps fail) ──
       - name: Print run URL
@@ -205,7 +198,7 @@ jobs:
         run: |
           echo ""
           echo "  👉 Actions run : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          echo "  📊 HTML report : ${{ steps.pages_deploy.outputs.page_url }}"
+          echo "  🏁 Verdict     : ${{ steps.analyse.outputs.verdict }}"
           echo ""
 
       # ── 10. Print summary + full k6 output ────────────────────────────────
@@ -213,7 +206,7 @@ jobs:
         if: always()
         run: |
           echo "========================================"
-          echo "  k6 Load Test — ${{ steps.metrics.outputs.icon }} ${{ steps.metrics.outputs.status }}"
+          echo "  k6 Load Test — ${{ steps.metrics.outputs.icon }} ${{ steps.metrics.outputs.status }} | Verdict: ${{ steps.analyse.outputs.verdict }}"
           echo "========================================"
           echo "  Repository    : ${{ github.repository }}"
           echo "  Branch        : ${{ github.ref_name }}"
