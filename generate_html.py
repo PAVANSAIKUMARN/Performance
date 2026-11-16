@@ -72,6 +72,11 @@ def parse_file(path):
     failed = defaultdict(int)
     statuses = defaultdict(int)
     check_counts = defaultdict(lambda: [0, 0])
+    error_details = defaultdict(lambda: {
+        "count": 0,
+        "statuses": defaultdict(int),
+        "messages": defaultdict(int),
+    })
     timestamps = []
     total_http = 0
     total_failed_http = 0
@@ -121,6 +126,13 @@ def parse_file(path):
                     total_failed_http += 1
                     name = tags.get("name") or tags.get("url") or "Unnamed request"
                     failed[name] += 1
+                    status = tags.get("status", "")
+                    error = tags.get("error") or tags.get("error_code") or ""
+                    error_details[name]["count"] += 1
+                    if status:
+                        error_details[name]["statuses"][status] += 1
+                    if error:
+                        error_details[name]["messages"][error] += 1
             elif metric == "http_req_duration":
                 pass
             elif metric == "checks":
@@ -151,6 +163,10 @@ def parse_file(path):
         "requests": {k: stats(v) for k, v in sorted(requests.items())},
         "failed_by_request": dict(failed),
         "statuses": dict(statuses),
+        "error_details": {
+            k: {"count": v["count"], "statuses": dict(v["statuses"]), "messages": dict(v["messages"])}
+            for k, v in error_details.items()
+        },
         "checks": dict(check_counts),
         "http_reqs": int(total_http),
         "failed_http_samples": int(total_failed_http),
@@ -190,6 +206,24 @@ def build_report(data, input_name, output):
         check_rows.append({"name": name, "total": total, "passed": passed,
                            "failed": total-passed,
                            "rate": (passed/total*100) if total else 0})
+    error_rows = []
+    for name, ed in sorted(data["error_details"].items(), key=lambda x: -x[1]["count"]):
+        status_str = ", ".join(
+            f"HTTP {s} ×{c}" for s, c in sorted(ed["statuses"].items())
+        ) or "—"
+        msg_str = "; ".join(
+            f"{html.escape(m)} ×{c}"
+            for m, c in sorted(ed["messages"].items(), key=lambda x: -x[1])[:3]
+        ) or "—"
+        error_rows.append({"name": name, "count": ed["count"],
+                           "statuses": status_str, "messages": msg_str})
+    error_table = table(error_rows, [
+        ("Endpoint", "name", identity),
+        ("Failures", "count", count),
+        ("Status Codes", "statuses", identity),
+        ("Error Messages", "messages", identity),
+    ]) if error_rows else "<p style='color:var(--green)'>No failures recorded.</p>"
+
     group_table = table(groups, [
         ("Transaction", "name", identity), ("Executions", "count", count),
         ("Avg", "avg", ms), ("Min", "min", ms), ("Max", "max", ms),
@@ -244,6 +278,7 @@ footer{{color:var(--muted);padding:18px 2px;font-size:12px}}.pill{{display:inlin
 <section class="section"><h2>HTTP status distribution</h2>
 {table([{"status":k,"count":v} for k,v in sorted(data["statuses"].items())],
 [("HTTP status","status",identity),("Requests","count",count)])}</section>
+<section class="section"><h2>Error details</h2>{error_table}</section>
 <footer>* HTTP failure ratio is an estimate from emitted http_req_failed samples divided by http_reqs. Transaction duration uses k6 group_duration samples and includes time spent inside the group, including sleep(). Percentiles are calculated from recorded samples. This report only includes metrics present in the input JSON.</footer>
 </main></body></html>"""
     Path(output).write_text(html_doc, encoding="utf-8")
