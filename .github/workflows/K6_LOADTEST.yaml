@@ -87,7 +87,12 @@ jobs:
             echo "ℹ️  No data.csv — public/unauthenticated test"
           fi
 
-      # ── 6. Run k6 ──────────────────────────────────────────────────────────
+      # ── 6. Syntax check (k6 inspect — no network calls, fails fast on bad JS) ──
+      - name: Validate k6 script syntax
+        working-directory: ${{ env.K6_DIR }}
+        run: k6 inspect $(ls *.js | head -1)
+
+      # ── 7. Run k6 ──────────────────────────────────────────────────────────
       - name: Run k6 load test
         id: k6
         working-directory: ${{ env.K6_DIR }}
